@@ -1,7 +1,7 @@
 import './style.css';
 
 const $ = (s) => document.querySelector(s);
-const state = {stream:null,mode:'door',busy:false,scan:false,interval:null,objects:null,clip:null,ocr:null,lastResult:'',lastAnnouncement:'',lastDirection:'',doorCandidate:'',doorStreak:0,lastDoorSpoken:'',lastBeep:0,lastSpokenAt:0,audio:null,recognition:null,speaking:false};
+const state = {stream:null,mode:'door',busy:false,scan:false,interval:null,objects:null,clip:null,ocr:null,lastResult:'',lastAnnouncement:'',lastDirection:'',doorCandidate:'',doorStreak:0,lastDoorSpoken:'',lastBeep:0,lastSpokenAt:0,tickTimer:null,tickLevel:0,tickExpires:0,audio:null,recognition:null,speaking:false};
 const SETTINGS_KEY='vividpath-settings-v1';
 let settings={rate:1,frequency:6,beeps:true,autoSpeak:true};
 try{settings={...settings,...JSON.parse(localStorage.getItem(SETTINGS_KEY)||'{}')}}catch{}
@@ -13,10 +13,10 @@ $('#app').innerHTML=`<main class="app"><header class="top"><div class="brand"><d
 <div class="control"><button id="toggleCamera" class="primary">Start camera</button><button id="scanButton" class="secondary" disabled>Analyze frame</button><button id="autoButton" class="secondary" disabled>Start continuous mode</button></div></section>
 <div class="section-title">MODES</div><section class="features" id="features" aria-label="Assistance modes">${features.map(([id,name,desc])=>`<button class="feature ${id==='door'?'selected':''}" data-mode="${id}" aria-pressed="${id==='door'}"><span class="symbol" aria-hidden="true">${icons[id]}</span><strong>${name}</strong><small>${desc}</small></button>`).join('')}</section>
 <section class="panel" aria-live="off"><h2 id="modeTitle">🚪 Find a door</h2><p id="modeInfo" class="muted" hidden></p><div id="status" class="status" role="status" aria-live="polite">Start the camera to begin.</div><div id="result" class="result" aria-live="polite"></div><div class="row" style="margin-top:15px"><button id="repeat" class="secondary">Repeat audio</button><button id="stopSpeech" class="secondary">Stop audio</button></div><div id="askBox" style="display:none;margin-top:14px"><label for="question" class="note">Ask about the scene or choose a command</label><input class="field" id="question" placeholder="Where is the door?" autocomplete="off"/><div class="row" style="margin-top:10px"><button id="askSubmit" class="secondary">Ask question</button><button id="voiceButton" class="secondary">Voice input</button></div><p class="note">Try: “Where is the door?”, “What is in front of me?”, “Read this sign”. Speech recognition support varies by browser.</p></div><div id="readerBox" style="display:none;margin-top:14px"><div class="row"><button id="pauseSpeech" class="secondary">Pause voice</button><button id="resumeSpeech" class="secondary">Resume voice</button></div></div></section>
-<section class="panel"><h2>Settings</h2><div class="setting"><label for="rate">Speech speed</label><select id="rate" class="field"><option value="0.8">Slower</option><option value="1">Normal</option><option value="1.2">Faster</option><option value="1.5">Fastest</option></select></div><div class="setting"><label for="frequency">Automatic scan interval</label><select id="frequency" class="field"><option value="3">3 seconds</option><option value="6">6 seconds</option><option value="10">10 seconds</option><option value="15">15 seconds</option></select></div><div class="setting"><label for="beeps">Directional audio cues</label><input type="checkbox" id="beeps"/></div><div class="setting"><label for="autoSpeak">Speak results outside continuous mode</label><input type="checkbox" id="autoSpeak"/></div></section>
+<section class="panel"><h2>Settings</h2><div class="setting"><label for="rate">Speech speed</label><select id="rate" class="field"><option value="0.8">Slower</option><option value="1">Normal</option><option value="1.2">Faster</option><option value="1.5">Fastest</option></select></div><div class="setting"><label for="frequency">Automatic scan interval</label><select id="frequency" class="field"><option value="3">3 seconds</option><option value="6">6 seconds</option><option value="10">10 seconds</option><option value="15">15 seconds</option></select></div><div class="setting"><label for="beeps">Door proximity-style ticking</label><input type="checkbox" id="beeps"/></div><div class="setting"><label for="autoSpeak">Speak results outside continuous mode</label><input type="checkbox" id="autoSpeak"/></div></section>
 </main>`;
 $('#rate').value=String(settings.rate);$('#frequency').value=String(settings.frequency);$('#beeps').checked=settings.beeps;$('#autoSpeak').checked=settings.autoSpeak;
-for(const id of ['rate','frequency','beeps','autoSpeak']){$('#'+id).addEventListener('change',()=>{settings.rate=Number($('#rate').value);settings.frequency=Number($('#frequency').value);settings.beeps=$('#beeps').checked;settings.autoSpeak=$('#autoSpeak').checked;localStorage.setItem(SETTINGS_KEY,JSON.stringify(settings));if(state.scan){stopAuto();startAuto()}})}
+for(const id of ['rate','frequency','beeps','autoSpeak']){$('#'+id).addEventListener('change',()=>{settings.rate=Number($('#rate').value);settings.frequency=Number($('#frequency').value);settings.beeps=$('#beeps').checked;if(!settings.beeps)stopTicks();settings.autoSpeak=$('#autoSpeak').checked;localStorage.setItem(SETTINGS_KEY,JSON.stringify(settings));if(state.scan){stopAuto();startAuto()}})}
 const modeTexts={door:['Find a door',''],describe:['Describe scene','Summarizes the arrangement of recognizable items in the current camera frame. It cannot describe everything in a room.'],objects:['Identify objects','Finds recognizable objects and reports approximate areas in the camera view.'],read:['Read text','Reads visible printed text with local optical character recognition.'],ask:['Ask VividPath','Ask preset types of questions about camera-recognized objects, text, or doors. This is not a general conversational AI.']};
 function status(msg){$('#status').textContent=msg}
 function result(msg,{speak=true}={}){
@@ -47,11 +47,42 @@ function say(msg){
     synth.speak(u);
   }catch(e){console.warn('Speech unavailable',e)}
 }
-function playBeep(direction){if(!settings.beeps)return;try{state.audio??=new (window.AudioContext||window.webkitAudioContext)();const ctx=state.audio;ctx.resume();const now=ctx.currentTime;const count=direction==='center'?3:direction==='left'?1:2;for(let i=0;i<count;i++){const osc=ctx.createOscillator(),gain=ctx.createGain();osc.type='sine';osc.frequency.value=direction==='center'?820:direction==='left'?470:650;gain.gain.setValueAtTime(0,now+i*.17);gain.gain.linearRampToValueAtTime(.14,now+i*.17+.015);gain.gain.exponentialRampToValueAtTime(.001,now+i*.17+.12);osc.connect(gain);gain.connect(ctx.destination);osc.start(now+i*.17);osc.stop(now+i*.17+.13)}}catch(e){console.warn(e)}try{if(typeof navigator.vibrate==='function'){navigator.vibrate(direction==='center'?[70,80,70,80,70]:direction==='right'?[110,90,110]:[170]);}}catch(e){console.warn('Vibration unavailable',e)}}
-function setMode(mode){stopAuto();state.mode=mode;state.doorCandidate='';state.doorStreak=0;state.lastDoorSpoken='';document.querySelectorAll('[data-mode]').forEach(x=>{let selected=x.dataset.mode===mode;x.classList.toggle('selected',selected);x.setAttribute('aria-pressed',String(selected))});$('#modeTitle').textContent=modeTexts[mode][0];$('#modeInfo').textContent=modeTexts[mode][1];$('#modeInfo').hidden=!modeTexts[mode][1];$('#modeTag').textContent=mode.toUpperCase()+' MODE';$('#camera').classList.toggle('door',mode==='door');$('#askBox').style.display=mode==='ask'?'block':'none';$('#readerBox').style.display=mode==='read'?'block':'none';status('Mode selected. '+(state.stream?'Tap Analyze frame to start.':'Start the camera to begin.'));$('#result').textContent='';}
+// Lightweight synthesized ticks. Tick tempo responds to a VISUAL prominence
+// score, not measured depth. This is a stationary demonstration cue only.
+function stopTicks(){
+  if(state.tickTimer!==null){clearInterval(state.tickTimer);state.tickTimer=null;}
+  state.tickLevel=0;state.tickExpires=0;
+  try{navigator.vibrate?.(0)}catch{}
+}
+function makeTick(){
+  if(!settings.beeps||!state.stream||state.mode!=='door'||document.hidden||Date.now()>state.tickExpires){stopTicks();return}
+  try{
+    const ctx=state.audio;if(!ctx||ctx.state!=='running')return;
+    const at=ctx.currentTime,osc=ctx.createOscillator(),gain=ctx.createGain();
+    osc.type='square';osc.frequency.setValueAtTime(900,at);
+    gain.gain.setValueAtTime(0.0001,at);
+    gain.gain.exponentialRampToValueAtTime(0.085,at+0.004);
+    gain.gain.exponentialRampToValueAtTime(0.0001,at+0.045);
+    osc.connect(gain);gain.connect(ctx.destination);
+    osc.start(at);osc.stop(at+0.06);
+    if(typeof navigator.vibrate==='function')navigator.vibrate(28);
+  }catch(e){console.warn('Tick audio:',e)}
+}
+function updateTicks(prominence){
+  if(!settings.beeps)return stopTicks();
+  // 500–1100ms between ticks. High similarity isn't proof of closeness.
+  const level=Math.max(0,Math.min(1,(prominence-0.54)/0.34));
+  const interval=Math.round(1100-600*level);
+  state.tickExpires=Date.now()+Math.max(4500,settings.frequency*1000+2000);
+  if(state.tickTimer!==null&&Math.abs(state.tickLevel-interval)<90)return;
+  if(state.tickTimer!==null)clearInterval(state.tickTimer);
+  state.tickLevel=interval;
+  makeTick();state.tickTimer=setInterval(makeTick,interval);
+}
+function setMode(mode){stopTicks();stopAuto();state.mode=mode;state.doorCandidate='';state.doorStreak=0;state.lastDoorSpoken='';document.querySelectorAll('[data-mode]').forEach(x=>{let selected=x.dataset.mode===mode;x.classList.toggle('selected',selected);x.setAttribute('aria-pressed',String(selected))});$('#modeTitle').textContent=modeTexts[mode][0];$('#modeInfo').textContent=modeTexts[mode][1];$('#modeInfo').hidden=!modeTexts[mode][1];$('#modeTag').textContent=mode.toUpperCase()+' MODE';$('#camera').classList.toggle('door',mode==='door');$('#askBox').style.display=mode==='ask'?'block':'none';$('#readerBox').style.display=mode==='read'?'block':'none';status('Mode selected. '+(state.stream?'Tap Analyze frame to start.':'Start the camera to begin.'));$('#result').textContent='';}
 document.querySelectorAll('[data-mode]').forEach(x=>x.addEventListener('click',()=>setMode(x.dataset.mode)));
 async function startCamera(){if(!window.isSecureContext){status('The camera requires a secure HTTPS address (or localhost). Deploy this site to HTTPS.');return}if(!navigator.mediaDevices?.getUserMedia){status('This browser does not support live camera access. Open in iPhone Safari.');return}try{status('Requesting rear camera permission…');const stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}}});state.stream=stream;$('#video').srcObject=stream;await $('#video').play();$('#camera').classList.add('active');$('#camtag').classList.add('live');$('#camtag').textContent='LIVE CAMERA';$('#toggleCamera').textContent='Stop camera';$('#toggleCamera').classList.add('danger');$('#scanButton').disabled=false;$('#autoButton').disabled=false;status('Camera live. Select a mode, then tap Analyze frame.');}catch(e){status('Camera could not start: '+(e.name==='NotAllowedError'?'permission denied. Allow camera access in Safari settings.':e.message))}}
-function stopCamera(){stopAuto();state.stream?.getTracks().forEach(t=>t.stop());state.stream=null;$('#video').srcObject=null;$('#camera').classList.remove('active');$('#camtag').classList.remove('live');$('#camtag').textContent='● CAMERA OFF';$('#toggleCamera').textContent='Start camera';$('#toggleCamera').classList.remove('danger');$('#scanButton').disabled=true;$('#autoButton').disabled=true;window.speechSynthesis?.cancel();status('Camera stopped.')}
+function stopCamera(){stopTicks();stopAuto();state.stream?.getTracks().forEach(t=>t.stop());state.stream=null;$('#video').srcObject=null;$('#camera').classList.remove('active');$('#camtag').classList.remove('live');$('#camtag').textContent='● CAMERA OFF';$('#toggleCamera').textContent='Start camera';$('#toggleCamera').classList.remove('danger');$('#scanButton').disabled=true;$('#autoButton').disabled=true;window.speechSynthesis?.cancel();status('Camera stopped.')}
 $('#toggleCamera').addEventListener('click',()=>state.stream?stopCamera():startCamera());
 function capture(crop){const video=$('#video');if(!video.videoWidth)throw Error('Waiting for camera image.');const c=document.createElement('canvas');const w=video.videoWidth,h=video.videoHeight;const r=crop||[0,0,1,1];c.width=Math.max(1,Math.round(Math.min(640,w*r[2])));c.height=Math.max(1,Math.round(c.width*r[3]*h/(r[2]*w)));const ctx=c.getContext('2d',{willReadFrequently:true});ctx.drawImage(video,w*r[0],h*r[1],w*r[2],h*r[3],0,0,c.width,c.height);return c}
 async function loadObjects(){if(!state.objects){status('Downloading the object recognition model (one-time, free)…');const [tf,coco]=await Promise.all([import('@tensorflow/tfjs'),import('@tensorflow-models/coco-ssd')]);await tf.ready();state.objects=await coco.load({base:'lite_mobilenet_v2'});}return state.objects}
@@ -108,16 +139,15 @@ async function findDoor(){
   }
   const left=results[0].positive,right=results[1].positive;
   // This classifier measures visual similarity, not calibrated detection confidence.
-  if(Math.max(left,right)<.54){state.doorCandidate='';state.doorStreak=0;state.lastDirection='';return '';}
+  if(Math.max(left,right)<.54){state.doorCandidate='';state.doorStreak=0;state.lastDirection='';stopTicks();return '';}
   const direction=Math.abs(left-right)<.10?'center':left>right?'left':'right';
   state.doorStreak=state.doorCandidate===direction?state.doorStreak+1:1;
   state.doorCandidate=direction;
   // Do not require two scans: that had delayed the first spoken response.
   state.lastDirection=direction;
   const phrase=direction==='center'?'Door ahead':`Door ${direction}`;
-  if(phrase!==state.lastDoorSpoken||Date.now()-state.lastBeep>10000){
-    playBeep(direction);state.lastDoorSpoken=phrase;state.lastBeep=Date.now();
-  }
+  updateTicks(Math.max(left,right));
+  state.lastDoorSpoken=phrase;
   return phrase;
 }
 
@@ -172,15 +202,15 @@ async function readText(){
 }
 async function analyze(){if(!state.stream||state.busy)return;state.busy=true;$('#scanButton').disabled=true;try{let answer;if(state.mode==='door')answer=await findDoor();else if(state.mode==='read')answer=await readText();else if(state.mode==='describe')answer=await describeScene();else answer=await recognizeObjects();if(state.mode==='door'&&!answer){result('',{speak:false});status('Scanning…');}else{result(answer);status('Analysis complete · '+new Date().toLocaleTimeString());}}catch(e){console.error(e);status('Analysis unavailable: '+e.message+'. Check your connection and available device memory.');}finally{state.busy=false;$('#scanButton').disabled=!state.stream;}}
 $('#scanButton').addEventListener('click',()=>{unlockSpeech();analyze();});
-function stopAuto(){state.scan=false;clearInterval(state.interval);state.interval=null;$('#autoButton').textContent='Start continuous mode';$('#autoButton').classList.remove('danger');$('#scanTag').textContent='NOT SCANNING'}
+function stopAuto(){stopTicks();state.scan=false;clearInterval(state.interval);state.interval=null;$('#autoButton').textContent='Start continuous mode';$('#autoButton').classList.remove('danger');$('#scanTag').textContent='NOT SCANNING'}
 function startAuto(){if(!state.stream)return;state.scan=true;state.lastAnnouncement='';state.lastSpokenAt=0;if(state.mode!=='door')say('Continuous mode started.');$('#autoButton').textContent='Stop continuous mode';$('#autoButton').classList.add('danger');$('#scanTag').textContent='AUTO SCAN '+settings.frequency+'S';analyze();state.interval=setInterval(()=>{if(!state.busy)analyze()},settings.frequency*1000)}
 $('#autoButton').addEventListener('click',()=>{unlockSpeech();state.scan?stopAuto():startAuto();});
 $('#repeat').addEventListener('click',()=>{unlockSpeech();state.lastResult?say(state.lastResult):status('No result to repeat yet.');});
-$('#stopSpeech').addEventListener('click',()=>window.speechSynthesis?.cancel());
+$('#stopSpeech').addEventListener('click',()=>{window.speechSynthesis?.cancel();stopTicks();});
 $('#pauseSpeech').addEventListener('click',()=>window.speechSynthesis?.pause());
 $('#resumeSpeech').addEventListener('click',()=>window.speechSynthesis?.resume());
 async function ask(){const q=$('#question').value.trim().toLowerCase();if(!q){status('Type a question first.');return}if(!state.stream){status('Start the camera to ask about what is visible.');return}if(/door|exit|entrance|way out|navigate/.test(q))setMode('door');else if(/read|text|sign|menu|label|written/.test(q))setMode('read');else if(/describe|surround|scene|room|around me|front of me/.test(q))setMode('describe');else setMode('objects');await analyze();}
 $('#askSubmit').addEventListener('click',ask);$('#question').addEventListener('keydown',e=>{if(e.key==='Enter')ask()});
 $('#voiceButton').addEventListener('click',()=>{const SR=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SR){status('Voice transcription is not supported by this browser. Use the question box or iPhone keyboard dictation.');return}try{state.recognition?.abort();const recognition=new SR();state.recognition=recognition;recognition.lang='en-US';recognition.interimResults=false;recognition.onresult=e=>{$('#question').value=e.results[0][0].transcript;ask()};recognition.onerror=e=>status('Speech recognition error: '+e.error);recognition.onend=()=>{$('#voiceButton').textContent='Voice input'};$('#voiceButton').textContent='Listening…';recognition.start()}catch(e){status('Microphone could not start: '+e.message)}});
-window.addEventListener('pagehide',()=>{stopCamera();state.ocr?.terminate?.()});document.addEventListener('visibilitychange',()=>{if(document.hidden){stopAuto();window.speechSynthesis?.cancel()}});
+window.addEventListener('pagehide',()=>{stopCamera();state.ocr?.terminate?.()});document.addEventListener('visibilitychange',()=>{if(document.hidden){stopTicks();stopAuto();window.speechSynthesis?.cancel()}});
 setMode('door');
