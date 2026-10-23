@@ -1,7 +1,7 @@
 import './style.css';
 
 const $ = (s) => document.querySelector(s);
-const state = {stream:null,mode:'door',busy:false,scan:false,interval:null,objects:null,clip:null,ocr:null,lastResult:'',lastAnnouncement:'',lastDirection:'',lastBeep:0,audio:null,recognition:null,speaking:false};
+const state = {stream:null,mode:'door',busy:false,scan:false,interval:null,objects:null,clip:null,ocr:null,lastResult:'',lastAnnouncement:'',lastDirection:'',doorCandidate:'',doorStreak:0,lastDoorSpoken:'',lastBeep:0,audio:null,recognition:null,speaking:false};
 const SETTINGS_KEY='vividpath-settings-v1';
 let settings={rate:1,frequency:6,beeps:true,autoSpeak:true};
 try{settings={...settings,...JSON.parse(localStorage.getItem(SETTINGS_KEY)||'{}')}}catch{}
@@ -13,16 +13,16 @@ $('#app').innerHTML=`<main class="app"><header class="top"><div class="brand"><d
 <div class="control"><button id="toggleCamera" class="primary">Start camera</button><button id="scanButton" class="secondary" disabled>Analyze frame</button><button id="autoButton" class="secondary" disabled>Start continuous mode</button></div></section>
 <div class="section-title">MODES</div><section class="features" id="features" aria-label="Assistance modes">${features.map(([id,name,desc])=>`<button class="feature ${id==='door'?'selected':''}" data-mode="${id}" aria-pressed="${id==='door'}"><span class="symbol" aria-hidden="true">${icons[id]}</span><strong>${name}</strong><small>${desc}</small></button>`).join('')}</section>
 <section class="panel" aria-live="off"><h2 id="modeTitle">🚪 Find a door</h2><p id="modeInfo" class="muted">Looks for a door-like region in the live view and announces left, center, or right. This cannot confirm which door is nearest or whether walking toward it is safe.</p><div id="status" class="status" role="status" aria-live="polite">Start the camera to begin.</div><div id="result" class="result" aria-live="polite"></div><div class="row" style="margin-top:15px"><button id="repeat" class="secondary">Repeat audio</button><button id="stopSpeech" class="secondary">Stop audio</button></div><div id="askBox" style="display:none;margin-top:14px"><label for="question" class="note">Ask about the scene or choose a command</label><input class="field" id="question" placeholder="Where is the door?" autocomplete="off"/><div class="row" style="margin-top:10px"><button id="askSubmit" class="secondary">Ask question</button><button id="voiceButton" class="secondary">Voice input</button></div><p class="note">Try: “Where is the door?”, “What is in front of me?”, “Read this sign”. Speech recognition support varies by browser.</p></div><div id="readerBox" style="display:none;margin-top:14px"><div class="row"><button id="pauseSpeech" class="secondary">Pause voice</button><button id="resumeSpeech" class="secondary">Resume voice</button></div></div></section>
-<section class="panel"><h2>Settings</h2><div class="setting"><label for="rate">Speech speed</label><select id="rate" class="field"><option value="0.8">Slower</option><option value="1">Normal</option><option value="1.2">Faster</option><option value="1.5">Fastest</option></select></div><div class="setting"><label for="frequency">Automatic scan interval</label><select id="frequency" class="field"><option value="3">3 seconds</option><option value="6">6 seconds</option><option value="10">10 seconds</option><option value="15">15 seconds</option></select></div><div class="setting"><label for="beeps">Directional audio cues</label><input type="checkbox" id="beeps"/></div><div class="setting"><label for="autoSpeak">Speak results outside continuous mode</label><input type="checkbox" id="autoSpeak"/></div><p class="note warning">Safety: VividPath is a demonstration assistant, not a navigation or mobility aid. It cannot judge safe routes, hazards, depth, or door distance. Use a cane, guide dog, or sighted assistance as appropriate. Do not walk based on these audio cues.</p><p class="note">Privacy: Camera frames are processed locally in your browser. AI models and OCR resources are downloaded from public third-party hosts. No image frames are sent to an inference service by this app. Do not point the camera at private information if you are uncomfortable with browser processing.</p></section><footer class="footer">VividPath · Camera tools · Internet required for first model download</footer>
+<section class="panel"><h2>Settings</h2><div class="setting"><label for="rate">Speech speed</label><select id="rate" class="field"><option value="0.8">Slower</option><option value="1">Normal</option><option value="1.2">Faster</option><option value="1.5">Fastest</option></select></div><div class="setting"><label for="frequency">Automatic scan interval</label><select id="frequency" class="field"><option value="3">3 seconds</option><option value="6">6 seconds</option><option value="10">10 seconds</option><option value="15">15 seconds</option></select></div><div class="setting"><label for="beeps">Directional audio cues</label><input type="checkbox" id="beeps"/></div><div class="setting"><label for="autoSpeak">Speak results outside continuous mode</label><input type="checkbox" id="autoSpeak"/></div></section>
 </main>`;
 $('#rate').value=String(settings.rate);$('#frequency').value=String(settings.frequency);$('#beeps').checked=settings.beeps;$('#autoSpeak').checked=settings.autoSpeak;
 for(const id of ['rate','frequency','beeps','autoSpeak']){$('#'+id).addEventListener('change',()=>{settings.rate=Number($('#rate').value);settings.frequency=Number($('#frequency').value);settings.beeps=$('#beeps').checked;settings.autoSpeak=$('#autoSpeak').checked;localStorage.setItem(SETTINGS_KEY,JSON.stringify(settings));if(state.scan){stopAuto();startAuto()}})}
 const modeTexts={door:['Find a door','Analyzes the left, center and right camera regions for possible doors. Direction is approximate; distance and safety are unknown.'],describe:['Describe scene','Summarizes the arrangement of recognizable items in the current camera frame. It cannot describe everything in a room.'],objects:['Identify objects','Finds recognizable objects and reports approximate areas in the camera view.'],read:['Read text','Reads visible printed text with local optical character recognition.'],ask:['Ask VividPath','Ask preset types of questions about camera-recognized objects, text, or doors. This is not a general conversational AI.']};
 function status(msg){$('#status').textContent=msg}
-function result(msg,{speak=true}={}){state.lastResult=msg;$('#result').textContent=msg;const normalized=msg.replace(/\s+/g,' ').trim();if(speak&&(state.scan||settings.autoSpeak)&&normalized!==state.lastAnnouncement){say(msg);state.lastAnnouncement=normalized}}
+function result(msg,{speak=true}={}){state.lastResult=msg;$('#result').textContent=msg;const normalized=msg.replace(/\s+/g,' ').trim();if(speak&&normalized&&(state.scan||settings.autoSpeak)&&normalized!==state.lastAnnouncement){say(msg);state.lastAnnouncement=normalized}}
 function say(msg){if(!('speechSynthesis' in window))return;window.speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(msg);u.rate=settings.rate;u.lang='en-US';window.speechSynthesis.speak(u)}
 function playBeep(direction){if(!settings.beeps)return;try{state.audio??=new (window.AudioContext||window.webkitAudioContext)();const ctx=state.audio;ctx.resume();const now=ctx.currentTime;const count=direction==='center'?3:direction==='left'?1:2;for(let i=0;i<count;i++){const osc=ctx.createOscillator(),gain=ctx.createGain();osc.type='sine';osc.frequency.value=direction==='center'?820:direction==='left'?470:650;gain.gain.setValueAtTime(0,now+i*.17);gain.gain.linearRampToValueAtTime(.14,now+i*.17+.015);gain.gain.exponentialRampToValueAtTime(.001,now+i*.17+.12);osc.connect(gain);gain.connect(ctx.destination);osc.start(now+i*.17);osc.stop(now+i*.17+.13)}}catch(e){console.warn(e)}try{if(typeof navigator.vibrate==='function'){navigator.vibrate(direction==='center'?[70,80,70,80,70]:direction==='right'?[110,90,110]:[170]);}}catch(e){console.warn('Vibration unavailable',e)}}
-function setMode(mode){stopAuto();state.mode=mode;document.querySelectorAll('[data-mode]').forEach(x=>{let selected=x.dataset.mode===mode;x.classList.toggle('selected',selected);x.setAttribute('aria-pressed',String(selected))});$('#modeTitle').textContent=modeTexts[mode][0];$('#modeInfo').textContent=modeTexts[mode][1];$('#modeTag').textContent=mode.toUpperCase()+' MODE';$('#camera').classList.toggle('door',mode==='door');$('#askBox').style.display=mode==='ask'?'block':'none';$('#readerBox').style.display=mode==='read'?'block':'none';status('Mode selected. '+(state.stream?'Tap Analyze frame to start.':'Start the camera to begin.'));$('#result').textContent='';}
+function setMode(mode){stopAuto();state.mode=mode;state.doorCandidate='';state.doorStreak=0;state.lastDoorSpoken='';document.querySelectorAll('[data-mode]').forEach(x=>{let selected=x.dataset.mode===mode;x.classList.toggle('selected',selected);x.setAttribute('aria-pressed',String(selected))});$('#modeTitle').textContent=modeTexts[mode][0];$('#modeInfo').textContent=modeTexts[mode][1];$('#modeTag').textContent=mode.toUpperCase()+' MODE';$('#camera').classList.toggle('door',mode==='door');$('#askBox').style.display=mode==='ask'?'block':'none';$('#readerBox').style.display=mode==='read'?'block':'none';status('Mode selected. '+(state.stream?'Tap Analyze frame to start.':'Start the camera to begin.'));$('#result').textContent='';}
 document.querySelectorAll('[data-mode]').forEach(x=>x.addEventListener('click',()=>setMode(x.dataset.mode)));
 async function startCamera(){if(!window.isSecureContext){status('The camera requires a secure HTTPS address (or localhost). Deploy this site to HTTPS.');return}if(!navigator.mediaDevices?.getUserMedia){status('This browser does not support live camera access. Open in iPhone Safari.');return}try{status('Requesting rear camera permission…');const stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}}});state.stream=stream;$('#video').srcObject=stream;await $('#video').play();$('#camera').classList.add('active');$('#camtag').classList.add('live');$('#camtag').textContent='LIVE CAMERA';$('#toggleCamera').textContent='Stop camera';$('#toggleCamera').classList.add('danger');$('#scanButton').disabled=false;$('#autoButton').disabled=false;status('Camera live. Select a mode, then tap Analyze frame.');}catch(e){status('Camera could not start: '+(e.name==='NotAllowedError'?'permission denied. Allow camera access in Safari settings.':e.message))}}
 function stopCamera(){stopAuto();state.stream?.getTracks().forEach(t=>t.stop());state.stream=null;$('#video').srcObject=null;$('#camera').classList.remove('active');$('#camtag').classList.remove('live');$('#camtag').textContent='● CAMERA OFF';$('#toggleCamera').textContent='Start camera';$('#toggleCamera').classList.remove('danger');$('#scanButton').disabled=true;$('#autoButton').disabled=true;window.speechSynthesis?.cancel();status('Camera stopped.')}
@@ -55,22 +55,55 @@ async function describeScene(){
   return sentence+'. This is a partial view.';
 }
 async function loadClip(){if(!state.clip){status('Downloading the door recognition model. This large, free model may take several minutes and use significant memory on an iPhone…');const {pipeline,env}=await import('@huggingface/transformers');env.allowLocalModels=false;state.clip=await pipeline('zero-shot-image-classification','Xenova/clip-vit-base-patch32',{dtype:'q8',device:'wasm'});}return state.clip;}
+// Directional *camera-view* detection, not distance estimation or a walking route.
+// Compare door prompts against non-door prompts within each crop rather than
+// comparing raw door softmax values from unrelated crops.
 async function findDoor(){
-  const classifier=await loadClip();status('Checking for a doorway…');
-  const regions=[['left',[0,0,.52,1]],['center',[.24,0,.52,1]],['right',[.48,0,.52,1]]];
-  const scores=[];
-  const labels=['a photo of a door or doorway','a photo of a wall without a door','a photo of a window','a photo of furniture'];
-  for(const [direction,crop] of regions){
-    const predictions=await classifier(capture(crop).toDataURL('image/jpeg',.78),labels);
-    scores.push({direction,score:predictions.find(x=>x.label===labels[0])?.score||0});
+  const classifier=await loadClip();status('Scanning for doors…');
+  const labels=[
+    'a photo of a door or doorway',
+    'a close-up photo of an indoor door',
+    'a photo of a door frame or entrance',
+    'a photo of a blank wall without a door',
+    'a photo of a window, not a door',
+    'a photo of furniture without a doorway',
+    'a photo of a hallway without a visible door'
+  ];
+  // Wider overlapping crops preserve close doors that extend past screen edges.
+  const regions=[
+    {direction:'left',rect:[0,0,.65,1]},
+    {direction:'center',rect:[.175,0,.65,1]},
+    {direction:'right',rect:[.35,0,.65,1]}
+  ];
+  const candidates=[];
+  for(const region of regions){
+    const image=capture(region.rect).toDataURL('image/jpeg',.86);
+    const predictions=await classifier(image,labels);
+    const lookup=new Map(predictions.map(p=>[p.label,p.score]));
+    const doorScore=Math.max(...labels.slice(0,3).map(l=>lookup.get(l)||0));
+    const negativeScore=Math.max(...labels.slice(3).map(l=>lookup.get(l)||0));
+    const confidence=doorScore-negativeScore;
+    candidates.push({direction:region.direction,confidence,doorScore});
   }
-  scores.sort((a,b)=>b.score-a.score);
-  const best=scores[0];
-  if(best.score<.37||best.score-scores[1].score<.065){state.lastDirection='';return 'Door not found.';}
+  candidates.sort((a,b)=>b.confidence-a.confidence);
+  const best=candidates[0];
+  // Confidence gating prevents announcing a door when the classifier is unsure.
+  const detected=best.doorScore>=.25&&best.confidence>=.065;
+  if(!detected){
+    state.doorCandidate='';state.doorStreak=0;state.lastDirection='';
+    // No speech and no beep when nothing is detected.
+    return '';
+  }
+  if(state.doorCandidate===best.direction)state.doorStreak++;
+  else{state.doorCandidate=best.direction;state.doorStreak=1;}
+  // When continuous scanning, require agreement across two scans to reduce chatter.
+  if(state.scan&&state.doorStreak<2)return '';
   state.lastDirection=best.direction;
-  playBeep(best.direction);
-  return best.direction==='center'?'Possible door ahead.':`Possible door ${best.direction}.`;
+  const phrase=best.direction==='center'?'Door ahead':`Door ${best.direction}`;
+  if(phrase!==state.lastDoorSpoken){playBeep(best.direction);state.lastDoorSpoken=phrase;}
+  return phrase;
 }
+
 function cleanOcr(data){
   // Rely on per-word confidence and line structure, not raw Tesseract text.
   const lines=(data.tsv||'').split(/\r?\n/).slice(1), kept=[];
@@ -120,7 +153,7 @@ async function readText(){
   }
   return best.text ? `Read text: ${best.text}` : 'I could not read the text clearly. Bring the camera closer, hold it still, and try stronger lighting.';
 }
-async function analyze(){if(!state.stream||state.busy)return;state.busy=true;$('#scanButton').disabled=true;try{let answer;if(state.mode==='door')answer=await findDoor();else if(state.mode==='read')answer=await readText();else if(state.mode==='describe')answer=await describeScene();else answer=await recognizeObjects();result(answer);status('Analysis complete · '+new Date().toLocaleTimeString());}catch(e){console.error(e);status('Analysis unavailable: '+e.message+'. Check your connection and available device memory.');}finally{state.busy=false;$('#scanButton').disabled=!state.stream;}}
+async function analyze(){if(!state.stream||state.busy)return;state.busy=true;$('#scanButton').disabled=true;try{let answer;if(state.mode==='door')answer=await findDoor();else if(state.mode==='read')answer=await readText();else if(state.mode==='describe')answer=await describeScene();else answer=await recognizeObjects();if(state.mode==='door'&&!answer){result('',{speak:false});status('Scanning…');state.lastAnnouncement='';state.lastDoorSpoken='';}else{result(answer);status('Analysis complete · '+new Date().toLocaleTimeString());}}catch(e){console.error(e);status('Analysis unavailable: '+e.message+'. Check your connection and available device memory.');}finally{state.busy=false;$('#scanButton').disabled=!state.stream;}}
 $('#scanButton').addEventListener('click',analyze);
 function stopAuto(){state.scan=false;clearInterval(state.interval);state.interval=null;$('#autoButton').textContent='Start continuous mode';$('#autoButton').classList.remove('danger');$('#scanTag').textContent='NOT SCANNING'}
 function startAuto(){if(!state.stream)return;state.scan=true;state.lastAnnouncement='';say('Continuous mode started. I will speak when I find something new.');$('#autoButton').textContent='Stop continuous mode';$('#autoButton').classList.add('danger');$('#scanTag').textContent='AUTO SCAN '+settings.frequency+'S';analyze();state.interval=setInterval(()=>{if(!state.busy)analyze()},settings.frequency*1000)}
