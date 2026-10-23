@@ -1,0 +1,6 @@
+{
+  "name":"vividpath","version":"1.0.0","private":true,"type":"module",
+  "scripts":{"dev":"vite --host 0.0.0.0","build":"vite build","preview":"vite preview --host 0.0.0.0"},
+  "dependencies":{"@tensorflow/tfjs":"^4.22.0","@tensorflow-models/coco-ssd":"^2.2.3","@huggingface/transformers":"^3.8.1","tesseract.js":"^6.0.1"},
+  "devDependencies":{"vite":"^6.3.0"}
+}
