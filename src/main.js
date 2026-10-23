@@ -1,7 +1,7 @@
 import './style.css';
 
 const $ = (s) => document.querySelector(s);
-const state = {stream:null,mode:'door',busy:false,scan:false,interval:null,objects:null,clip:null,ocr:null,lastResult:'',lastAnnouncement:'',lastDirection:'',doorCandidate:'',doorStreak:0,lastDoorSpoken:'',lastBeep:0,audio:null,recognition:null,speaking:false};
+const state = {stream:null,mode:'door',busy:false,scan:false,interval:null,objects:null,clip:null,ocr:null,lastResult:'',lastAnnouncement:'',lastDirection:'',doorCandidate:'',doorStreak:0,lastDoorSpoken:'',lastBeep:0,lastSpokenAt:0,audio:null,recognition:null,speaking:false};
 const SETTINGS_KEY='vividpath-settings-v1';
 let settings={rate:1,frequency:6,beeps:true,autoSpeak:true};
 try{settings={...settings,...JSON.parse(localStorage.getItem(SETTINGS_KEY)||'{}')}}catch{}
@@ -19,8 +19,34 @@ $('#rate').value=String(settings.rate);$('#frequency').value=String(settings.fre
 for(const id of ['rate','frequency','beeps','autoSpeak']){$('#'+id).addEventListener('change',()=>{settings.rate=Number($('#rate').value);settings.frequency=Number($('#frequency').value);settings.beeps=$('#beeps').checked;settings.autoSpeak=$('#autoSpeak').checked;localStorage.setItem(SETTINGS_KEY,JSON.stringify(settings));if(state.scan){stopAuto();startAuto()}})}
 const modeTexts={door:['Find a door',''],describe:['Describe scene','Summarizes the arrangement of recognizable items in the current camera frame. It cannot describe everything in a room.'],objects:['Identify objects','Finds recognizable objects and reports approximate areas in the camera view.'],read:['Read text','Reads visible printed text with local optical character recognition.'],ask:['Ask VividPath','Ask preset types of questions about camera-recognized objects, text, or doors. This is not a general conversational AI.']};
 function status(msg){$('#status').textContent=msg}
-function result(msg,{speak=true}={}){state.lastResult=msg;$('#result').textContent=msg;const normalized=msg.replace(/\s+/g,' ').trim();if(speak&&normalized&&(state.scan||settings.autoSpeak)&&normalized!==state.lastAnnouncement){say(msg);state.lastAnnouncement=normalized}}
-function say(msg){if(!('speechSynthesis' in window))return;window.speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(msg);u.rate=settings.rate;u.lang='en-US';window.speechSynthesis.speak(u)}
+function result(msg,{speak=true}={}){
+  state.lastResult=msg;$('#result').textContent=msg;
+  const normalized=msg.replace(/\s+/g,' ').trim();
+  // Manual scans always speak. Continuous scans can repeat an unchanged result after 10s.
+  const due=Date.now()-state.lastSpokenAt>10000;
+  if(speak&&normalized&&(state.scan||settings.autoSpeak)&&(!state.scan||normalized!==state.lastAnnouncement||due)){
+    say(msg);state.lastAnnouncement=normalized;state.lastSpokenAt=Date.now();
+  }
+}
+function unlockSpeech(){
+  // Must run directly inside an iPhone tap/click event, before any awaited model work.
+  if(!('speechSynthesis' in window))return;
+  try{
+    window.speechSynthesis.resume();
+    if(!state.voiceUnlocked){const u=new SpeechSynthesisUtterance(' ');u.volume=0;window.speechSynthesis.speak(u);state.voiceUnlocked=true;}
+    state.audio??=new (window.AudioContext||window.webkitAudioContext)();state.audio.resume();
+  }catch(e){console.warn('Audio unlock:',e)}
+}
+function say(msg){
+  if(!('speechSynthesis' in window)||!msg)return;
+  const synth=window.speechSynthesis;
+  try{
+    synth.cancel();synth.resume();
+    const u=new SpeechSynthesisUtterance(msg);u.rate=settings.rate;u.lang='en-US';u.volume=1;
+    u.onerror=e=>console.warn('Speech error:',e.error);
+    synth.speak(u);
+  }catch(e){console.warn('Speech unavailable',e)}
+}
 function playBeep(direction){if(!settings.beeps)return;try{state.audio??=new (window.AudioContext||window.webkitAudioContext)();const ctx=state.audio;ctx.resume();const now=ctx.currentTime;const count=direction==='center'?3:direction==='left'?1:2;for(let i=0;i<count;i++){const osc=ctx.createOscillator(),gain=ctx.createGain();osc.type='sine';osc.frequency.value=direction==='center'?820:direction==='left'?470:650;gain.gain.setValueAtTime(0,now+i*.17);gain.gain.linearRampToValueAtTime(.14,now+i*.17+.015);gain.gain.exponentialRampToValueAtTime(.001,now+i*.17+.12);osc.connect(gain);gain.connect(ctx.destination);osc.start(now+i*.17);osc.stop(now+i*.17+.13)}}catch(e){console.warn(e)}try{if(typeof navigator.vibrate==='function'){navigator.vibrate(direction==='center'?[70,80,70,80,70]:direction==='right'?[110,90,110]:[170]);}}catch(e){console.warn('Vibration unavailable',e)}}
 function setMode(mode){stopAuto();state.mode=mode;state.doorCandidate='';state.doorStreak=0;state.lastDoorSpoken='';document.querySelectorAll('[data-mode]').forEach(x=>{let selected=x.dataset.mode===mode;x.classList.toggle('selected',selected);x.setAttribute('aria-pressed',String(selected))});$('#modeTitle').textContent=modeTexts[mode][0];$('#modeInfo').textContent=modeTexts[mode][1];$('#modeInfo').hidden=!modeTexts[mode][1];$('#modeTag').textContent=mode.toUpperCase()+' MODE';$('#camera').classList.toggle('door',mode==='door');$('#askBox').style.display=mode==='ask'?'block':'none';$('#readerBox').style.display=mode==='read'?'block':'none';status('Mode selected. '+(state.stream?'Tap Analyze frame to start.':'Start the camera to begin.'));$('#result').textContent='';}
 document.querySelectorAll('[data-mode]').forEach(x=>x.addEventListener('click',()=>setMode(x.dataset.mode)));
@@ -59,49 +85,39 @@ async function loadClip(){if(!state.clip){status('Downloading the door recogniti
 // Compare door prompts against non-door prompts within each crop rather than
 // comparing raw door softmax values from unrelated crops.
 async function findDoor(){
-  const classifier=await loadClip();status('Scanning for doors…');
+  const classifier=await loadClip();status('Checking for doors…');
+  // Two overlapping crops instead of four model passes to reduce scan latency.
+  // A full door can still fit in each crop even when close to the camera.
   const labels=[
-    'an indoor doorway with a door',
-    'an open doorway or entrance to another room',
-    'a closed door viewed up close',
-    'a door frame and door handle',
-    'a plain wall with no door',
-    'a window with glass panes',
-    'furniture and shelves in a room',
-    'an empty wall or floor'
+    'a photo of a door or open doorway',
+    'a photo of a close up door frame',
+    'a photo of a wall without any door',
+    'a photo of a window or furniture'
   ];
-  // Full view catches close doors and entrances spanning the frame.
-  // Overlapping side crops give a rough image direction, not a physical bearing.
   const regions=[
-    {direction:'center',rect:[0,0,1,1],weight:1.08},
-    {direction:'left',rect:[0,0,.58,1],weight:1},
-    {direction:'center',rect:[.22,0,.56,1],weight:1},
-    {direction:'right',rect:[.42,0,.58,1],weight:1}
+    {direction:'left',rect:[0,0,.68,1]},
+    {direction:'right',rect:[.32,0,.68,1]}
   ];
-  const candidates=[];
-  for(const region of regions){
-    const image=capture(region.rect).toDataURL('image/jpeg',.88);
+  const results=[];
+  for(const r of regions){
+    const image=capture(r.rect).toDataURL('image/jpeg',.78);
     const predictions=await classifier(image,labels);
-    const lookup=new Map(predictions.map(p=>[p.label,p.score]));
-    const positive=labels.slice(0,4).reduce((n,l)=>n+(lookup.get(l)||0),0);
-    const negative=labels.slice(4).reduce((n,l)=>n+(lookup.get(l)||0),0);
-    const strongestDoor=Math.max(...labels.slice(0,4).map(l=>lookup.get(l)||0));
-    candidates.push({direction:region.direction,positive,negative,strongestDoor,score:(positive-negative)*region.weight});
+    const scores=new Map(predictions.map(p=>[p.label,p.score]));
+    const positive=(scores.get(labels[0])||0)+(scores.get(labels[1])||0);
+    results.push({direction:r.direction,positive});
   }
-  candidates.sort((a,b)=>b.score-a.score);
-  const best=candidates[0];
-  // These are heuristic thresholds, not calibrated door probabilities.
-  // Never make an announcement unless door-related labels outweigh alternatives.
-  if(!(best.positive>=.51 && best.score>=.07 && best.strongestDoor>=.19)){
-    state.doorCandidate='';state.doorStreak=0;state.lastDirection='';
-    return '';
+  const left=results[0].positive,right=results[1].positive;
+  // This classifier measures visual similarity, not calibrated detection confidence.
+  if(Math.max(left,right)<.54){state.doorCandidate='';state.doorStreak=0;state.lastDirection='';return '';}
+  const direction=Math.abs(left-right)<.10?'center':left>right?'left':'right';
+  state.doorStreak=state.doorCandidate===direction?state.doorStreak+1:1;
+  state.doorCandidate=direction;
+  // Do not require two scans: that had delayed the first spoken response.
+  state.lastDirection=direction;
+  const phrase=direction==='center'?'Door ahead':`Door ${direction}`;
+  if(phrase!==state.lastDoorSpoken||Date.now()-state.lastBeep>10000){
+    playBeep(direction);state.lastDoorSpoken=phrase;state.lastBeep=Date.now();
   }
-  if(state.doorCandidate===best.direction)state.doorStreak++;
-  else{state.doorCandidate=best.direction;state.doorStreak=1;}
-  if(state.scan&&state.doorStreak<2)return '';
-  state.lastDirection=best.direction;
-  const phrase=best.direction==='center'?'Door ahead':`Door ${best.direction}`;
-  if(phrase!==state.lastDoorSpoken){playBeep(best.direction);state.lastDoorSpoken=phrase;}
   return phrase;
 }
 
@@ -155,11 +171,11 @@ async function readText(){
   return best.text ? `Read text: ${best.text}` : 'I could not read the text clearly. Bring the camera closer, hold it still, and try stronger lighting.';
 }
 async function analyze(){if(!state.stream||state.busy)return;state.busy=true;$('#scanButton').disabled=true;try{let answer;if(state.mode==='door')answer=await findDoor();else if(state.mode==='read')answer=await readText();else if(state.mode==='describe')answer=await describeScene();else answer=await recognizeObjects();if(state.mode==='door'&&!answer){result('',{speak:false});status('Scanning…');}else{result(answer);status('Analysis complete · '+new Date().toLocaleTimeString());}}catch(e){console.error(e);status('Analysis unavailable: '+e.message+'. Check your connection and available device memory.');}finally{state.busy=false;$('#scanButton').disabled=!state.stream;}}
-$('#scanButton').addEventListener('click',analyze);
+$('#scanButton').addEventListener('click',()=>{unlockSpeech();analyze();});
 function stopAuto(){state.scan=false;clearInterval(state.interval);state.interval=null;$('#autoButton').textContent='Start continuous mode';$('#autoButton').classList.remove('danger');$('#scanTag').textContent='NOT SCANNING'}
-function startAuto(){if(!state.stream)return;state.scan=true;state.lastAnnouncement='';if(state.mode!=='door')say('Continuous mode started.');$('#autoButton').textContent='Stop continuous mode';$('#autoButton').classList.add('danger');$('#scanTag').textContent='AUTO SCAN '+settings.frequency+'S';analyze();state.interval=setInterval(()=>{if(!state.busy)analyze()},settings.frequency*1000)}
-$('#autoButton').addEventListener('click',()=>state.scan?stopAuto():startAuto());
-$('#repeat').addEventListener('click',()=>state.lastResult?say(state.lastResult):status('No result to repeat yet.'));
+function startAuto(){if(!state.stream)return;state.scan=true;state.lastAnnouncement='';state.lastSpokenAt=0;if(state.mode!=='door')say('Continuous mode started.');$('#autoButton').textContent='Stop continuous mode';$('#autoButton').classList.add('danger');$('#scanTag').textContent='AUTO SCAN '+settings.frequency+'S';analyze();state.interval=setInterval(()=>{if(!state.busy)analyze()},settings.frequency*1000)}
+$('#autoButton').addEventListener('click',()=>{unlockSpeech();state.scan?stopAuto():startAuto();});
+$('#repeat').addEventListener('click',()=>{unlockSpeech();state.lastResult?say(state.lastResult):status('No result to repeat yet.');});
 $('#stopSpeech').addEventListener('click',()=>window.speechSynthesis?.cancel());
 $('#pauseSpeech').addEventListener('click',()=>window.speechSynthesis?.pause());
 $('#resumeSpeech').addEventListener('click',()=>window.speechSynthesis?.resume());
