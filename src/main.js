@@ -15,7 +15,8 @@ $('#app').innerHTML=`<main class="app"><header class="top"><div class="brand"><d
 <section class="panel" aria-live="off"><h2 id="modeTitle">🚪 Find a door</h2><p id="modeInfo" class="muted" hidden></p><div id="status" class="status" role="status" aria-live="polite">Start the camera to begin.</div><div id="result" class="result" aria-live="polite"></div><div class="row" style="margin-top:15px"><button id="repeat" class="secondary">Repeat audio</button><button id="stopSpeech" class="secondary">Stop audio</button></div><div id="askBox" style="display:none;margin-top:14px"><label for="question" class="sr-only">Question</label><input class="field" id="question" placeholder="Where is the door?" autocomplete="off"/><div class="row" style="margin-top:10px"><button id="askSubmit" class="secondary">Ask question</button><button id="voiceButton" class="secondary">Voice input</button></div><p class="note"></p></div><div id="readerBox" style="display:none;margin-top:14px"><div class="row"><button id="pauseSpeech" class="secondary">Pause voice</button><button id="resumeSpeech" class="secondary">Resume voice</button></div></div></section>
 <section class="panel"><h2>Settings</h2><div class="setting"><label for="rate">Speech speed</label><select id="rate" class="field"><option value="0.8">Slower</option><option value="1">Normal</option><option value="1.2">Faster</option><option value="1.5">Fastest</option></select></div><div class="setting"><label for="frequency">Automatic scan interval</label><select id="frequency" class="field"><option value="3">3 seconds</option><option value="6">6 seconds</option><option value="10">10 seconds</option><option value="15">15 seconds</option></select></div><div class="setting"><label for="beeps">Door proximity-style ticking</label><input type="checkbox" id="beeps"/></div><div class="setting"><label for="autoSpeak">Speak results outside continuous mode</label><input type="checkbox" id="autoSpeak"/></div></section></div>
 <section id="nearbyPage" class="nearby-page" hidden aria-label="Accessibility Map"><div class="nearby-heading"><h1>Accessibility Map</h1><button id="locateButton" class="primary">Use my location</button></div><div id="locationStatus" role="status" aria-live="polite"></div><div id="nearbyMap" aria-label="Map of nearby public places"></div><div id="placeList" aria-live="polite"></div></section>
-<nav class="bottom-nav" aria-label="Main navigation"><button id="tabCamera" class="tab active" aria-current="page"><span aria-hidden="true">◎</span> Camera</button><button id="tabNearby" class="tab"><span aria-hidden="true">⌖</span> Accessibility Map</button></nav>
+<section id="reviewsPage" class="reviews-page" hidden aria-label="Reviews"><div class="nearby-heading"><h1>Reviews</h1><button id="reviewsLocate" class="primary" type="button">Find places</button></div><div id="reviewsStatus" role="status" aria-live="polite"></div><label class="review-label" for="reviewsSearch">Search public places</label><input class="field" id="reviewsSearch" type="search" placeholder="Search by name" autocomplete="off"/><div class="review-heading"><h2>Places near you</h2><span id="reviewSlideCount"></span></div><div id="reviewSlides" class="review-slides" aria-label="Five nearby places, scroll horizontally"></div><div id="reviewSearchResults" class="review-results"></div><section id="reviewFormArea" class="review-form" hidden><h2 id="reviewPlaceName"></h2><p id="reviewPlaceDetails"></p><fieldset><legend>Accessibility rating</legend><div class="rating-options"><label><input type="radio" name="reviewRating" value="No accessibility"/> No accessibility</label><label><input type="radio" name="reviewRating" value="Low accessibility"/> Low accessibility</label><label><input type="radio" name="reviewRating" value="Moderate accessibility"/> Moderate accessibility</label><label><input type="radio" name="reviewRating" value="High accessibility"/> High accessibility</label></div></fieldset><button id="saveReview" type="button" class="primary">Save rating</button><div id="reviewSaved" role="status" aria-live="polite"></div></section></section>
+<nav class="bottom-nav" aria-label="Main navigation"><button id="tabCamera" class="tab active" aria-current="page"><span aria-hidden="true">◎</span> Camera</button><button id="tabNearby" class="tab"><span aria-hidden="true">⌖</span> Accessibility Map</button><button id="tabReviews" class="tab"><span aria-hidden="true">★</span> Reviews</button></nav>
 </main>`;
 $('#rate').value=String(settings.rate);$('#frequency').value=String(settings.frequency);$('#beeps').checked=settings.beeps;$('#autoSpeak').checked=settings.autoSpeak;
 for(const id of ['rate','frequency','beeps','autoSpeak']){$('#'+id).addEventListener('change',()=>{settings.rate=Number($('#rate').value);settings.frequency=Number($('#frequency').value);settings.beeps=$('#beeps').checked;if(!settings.beeps)stopTicks();settings.autoSpeak=$('#autoSpeak').checked;localStorage.setItem(SETTINGS_KEY,JSON.stringify(settings));if(state.scan){stopAuto();startAuto()}})}
@@ -218,11 +219,21 @@ window.addEventListener('pagehide',()=>{stopCamera();state.ocr?.terminate?.()});
 setMode('door');
 
 // Nearby places: public OpenStreetMap data, not a validated accessibility certification.
-const nearbyState={map:null,markers:[],position:null,loaded:false,loading:false};
+const nearbyState={map:null,markers:[],position:null,loaded:false,loading:false,places:[]};
 const publicTypes={library:'Library',community_centre:'Community center',townhall:'Town hall',museum:'Museum',arts_centre:'Arts center',theatre:'Theater',cinema:'Cinema',public_building:'Public building',social_facility:'Social facility',hospital:'Hospital',clinic:'Clinic',post_office:'Post office',police:'Police station',university:'University',college:'College',school:'School'};
-function selectTab(name){const onMap=name==='nearby';$('#cameraPage').hidden=onMap;$('#nearbyPage').hidden=!onMap;$('#tabCamera').classList.toggle('active',!onMap);$('#tabNearby').classList.toggle('active',onMap);$('#tabCamera').setAttribute('aria-current',onMap?'false':'page');$('#tabNearby').setAttribute('aria-current',onMap?'page':'false');if(onMap){stopTicks();stopAuto();window.speechSynthesis?.cancel();if(nearbyState.map)setTimeout(()=>nearbyState.map.invalidateSize(),30)}}
+function selectTab(name){
+  const onMap=name==='nearby',onReviews=name==='reviews',onCamera=name==='camera';
+  $('#cameraPage').hidden=!onCamera;$('#nearbyPage').hidden=!onMap;$('#reviewsPage').hidden=!onReviews;
+  for(const [id,active] of [['tabCamera',onCamera],['tabNearby',onMap],['tabReviews',onReviews]]){
+    const button=$('#'+id);button.classList.toggle('active',active);button.setAttribute('aria-current',active?'page':'false');
+  }
+  if(!onCamera){stopTicks();stopAuto();window.speechSynthesis?.cancel();}
+  if(onMap&&nearbyState.map)setTimeout(()=>nearbyState.map.invalidateSize(),30);
+  if(onReviews){renderReviewPlaces(); if(!nearbyState.position&&!nearbyState.loading) loadReviewLocation();}
+}
 $('#tabCamera').addEventListener('click',()=>selectTab('camera'));
 $('#tabNearby').addEventListener('click',()=>selectTab('nearby'));
+$('#tabReviews').addEventListener('click',()=>selectTab('reviews'));
 function nearbyStatus(message){$('#locationStatus').textContent=message}
 function escapeText(s){return String(s??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]))}
 function getEvidence(tags){const e=[];for(const [key,desc] of [['tactile_paving','Tactile paving'],['tactile_map','Tactile map'],['braille','Braille information'],['audio_guidance','Audio guidance'],['audio_description','Audio description'],['guide_dogs','Guide dogs']]){const value=(tags[key]||'').toLowerCase();if(['yes','designated','available'].includes(value))e.push(desc)}if(tags['blind:description'])e.push('Accessibility description');if(tags['information']==='tactile_map')e.push('Tactile map');if(tags['information']==='audio')e.push('Audio information');return [...new Set(e)]}
@@ -244,5 +255,62 @@ function fetchLocation(){if(!navigator.geolocation){nearbyStatus('Location is un
 $('#locateButton').addEventListener('click',fetchLocation);
 async function setupLeaflet(){if(window.L)return window.L;const cssId='leaflet-vividpath';if(!document.getElementById(cssId)){const css=document.createElement('link');css.id=cssId;css.rel='stylesheet';css.href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';document.head.append(css)}if(!window.__vividLeafletPromise){window.__vividLeafletPromise=new Promise((resolve,reject)=>{const js=document.createElement('script');js.src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';js.onload=()=>resolve(window.L);js.onerror=()=>reject(Error('Map library is unavailable'));document.head.append(js)})}return window.__vividLeafletPromise}
 async function queryNearby(position){const lat=position.lat.toFixed(5),lon=position.lon.toFixed(5);const query=`[out:json][timeout:20];(nwr["amenity"~"^(library|community_centre|townhall|arts_centre|theatre|cinema|social_facility|hospital|clinic|post_office|police|university|college|school)$"](around:1800,${lat},${lon});nwr["tourism"="museum"](around:1800,${lat},${lon}););out center 140;`;const response=await fetch('https://overpass-api.de/api/interpreter',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},body:new URLSearchParams({data:query})});if(!response.ok)throw Error('Places request failed: '+response.status);const json=await response.json();const seen=new Set();return(json.elements||[]).map(el=>{const lat=el.lat??el.center?.lat,lon=el.lon??el.center?.lon,t=el.tags||{};if(!Number.isFinite(lat)||!Number.isFinite(lon)||!t.name)return null;const key=t.name.toLowerCase()+':'+lat.toFixed(3)+':'+lon.toFixed(3);if(seen.has(key))return null;seen.add(key);const evidence=getEvidence(t);const kind=publicTypes[t.amenity]||(t.tourism==='museum'?'Museum':'Public place');const categoryEstimate=categoryProfile(kind);return {name:t.name,kind,lat,lon,evidence,categoryEstimate,dist:distanceMeters(position,{lat,lon}),id:el.type+'/'+el.id}}).filter(Boolean).sort((a,b)=>b.evidence.length-a.evidence.length||b.categoryEstimate.rank-a.categoryEstimate.rank||a.dist-b.dist).slice(0,35)}
-async function loadNearby(position){const places=await queryNearby(position);const L=await setupLeaflet();if(!nearbyState.map){nearbyState.map=L.map('nearbyMap',{scrollWheelZoom:false}).setView([position.lat,position.lon],14);L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap contributors',maxZoom:19}).addTo(nearbyState.map)}const map=nearbyState.map;nearbyState.markers.forEach(m=>map.removeLayer(m));nearbyState.markers=[];map.setView([position.lat,position.lon],14);nearbyState.markers.push(L.circleMarker([position.lat,position.lon],{radius:8,color:'#155fbd',fillColor:'#155fbd',fillOpacity:1,weight:2}).addTo(map).bindPopup('Your location (approximate)'));const list=$('#placeList');list.replaceChildren();if(!places.length){nearbyStatus('No mapped public places found nearby. Try again in another area.');return}let identified=places.filter(p=>p.evidence.length).length;nearbyStatus(`${places.length} places · Category-based estimates`);
+async function loadNearby(position){const places=await queryNearby(position); nearbyState.places=places;const L=await setupLeaflet();if(!nearbyState.map){nearbyState.map=L.map('nearbyMap',{scrollWheelZoom:false}).setView([position.lat,position.lon],14);L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap contributors',maxZoom:19}).addTo(nearbyState.map)}const map=nearbyState.map;nearbyState.markers.forEach(m=>map.removeLayer(m));nearbyState.markers=[];map.setView([position.lat,position.lon],14);nearbyState.markers.push(L.circleMarker([position.lat,position.lon],{radius:8,color:'#155fbd',fillColor:'#155fbd',fillOpacity:1,weight:2}).addTo(map).bindPopup('Your location (approximate)'));const list=$('#placeList');list.replaceChildren();if(!places.length){nearbyStatus('No mapped public places found nearby. Try again in another area.');return}let identified=places.filter(p=>p.evidence.length).length;nearbyState.places=places; nearbyStatus(`${places.length} places nearby`); if(!$('#reviewsPage').hidden)renderReviewPlaces();
 for(const [index,p] of places.entries()){const marker=L.circleMarker([p.lat,p.lon],{radius:p.evidence.length?7:5,color:p.evidence.length?'#157453':'#68778c',fillColor:p.evidence.length?'#157453':'#68778c',fillOpacity:.85,weight:1}).addTo(map);nearbyState.markers.push(marker);marker.bindPopup(escapeText(p.name));const article=document.createElement('article');article.className='place-item';const evidence=p.evidence.length?`<span class="evidence">Recorded: ${escapeText(p.evidence.join(' · '))}</span>`:`<span class="demo-rating">Estimated · ${escapeText(p.categoryEstimate.rating)}</span><span class="demo-features">Check for: ${escapeText(p.categoryEstimate.features.join(' · '))}</span>`;article.innerHTML=`<div class="place-title"><strong>${escapeText(p.name)}</strong><span>${formatDistance(p.dist)}</span></div><div class="place-kind">${escapeText(p.kind)}</div>${evidence}<div class="place-actions"><button class="secondary place-show" type="button">Show on map</button><a class="place-link" target="_blank" rel="noopener noreferrer" href="https://www.openstreetmap.org/${encodeURIComponent(p.id.split('/')[0])}/${encodeURIComponent(p.id.split('/')[1])}">Place details ↗</a></div>`;article.querySelector('button').addEventListener('click',()=>{map.setView([p.lat,p.lon],16);marker.openPopup();document.getElementById('nearbyMap').scrollIntoView({behavior:'smooth',block:'center'})});list.append(article)}setTimeout(()=>map.invalidateSize(),50)}
+
+
+// Reviews are stored privately in this browser. They do not modify map rankings.
+const REVIEW_KEY='vividpath-place-reviews-v1';
+let reviewSelection=null;
+function savedReviews(){try{return JSON.parse(localStorage.getItem(REVIEW_KEY)||'{}')}catch{return {}}}
+function reviewKey(place){return place.id||`${place.name}:${place.lat}:${place.lon}`}
+function openReview(place){
+ reviewSelection=place;$('#reviewFormArea').hidden=false;$('#reviewPlaceName').textContent=place.name;
+ $('#reviewPlaceDetails').textContent=`${place.kind} · ${formatDistance(place.dist)}`;
+ $('#reviewSaved').textContent='';
+ const existing=savedReviews()[reviewKey(place)];
+ document.querySelectorAll('input[name="reviewRating"]').forEach(x=>x.checked=x.value===existing);
+ $('#reviewFormArea').scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+function renderReviewPlaces(){
+ const places=[...nearbyState.places].sort((a,b)=>a.dist-b.dist);
+ const slides=$('#reviewSlides'),results=$('#reviewSearchResults'),term=$('#reviewsSearch').value.trim().toLocaleLowerCase();
+ slides.replaceChildren();results.replaceChildren();
+ $('#reviewSlideCount').textContent=places.length?`${Math.min(5,places.length)} places`:'';
+ for(const place of places.slice(0,5)){
+   const card=document.createElement('button');card.type='button';card.className='review-slide';
+   const rating=savedReviews()[reviewKey(place)];
+   card.innerHTML=`<strong>${escapeText(place.name)}</strong><small>${escapeText(place.kind)} · ${formatDistance(place.dist)}</small>${rating?`<span>Your rating: ${escapeText(rating)}</span>`:'<span>Rate this place →</span>'}`;
+   card.addEventListener('click',()=>openReview(place));slides.append(card);
+ }
+ if(!places.length){$('#reviewsStatus').textContent='Use your location to find public places.';return;}
+ const matches=term?places.filter(p=>`${p.name} ${p.kind}`.toLocaleLowerCase().includes(term)):[];
+ if(term&&!matches.length){results.textContent='No matching nearby places.';return;}
+ for(const place of matches.slice(0,30)){
+   const button=document.createElement('button');button.className='review-search-item';button.type='button';
+   button.innerHTML=`<strong>${escapeText(place.name)}</strong><span>${escapeText(place.kind)} · ${formatDistance(place.dist)}</span>`;
+   button.addEventListener('click',()=>openReview(place));results.append(button);
+ }
+}
+async function loadReviewLocation(){
+ if(nearbyState.loading){$('#reviewsStatus').textContent='Loading nearby places…';return;}
+ if(nearbyState.position&&nearbyState.places.length){renderReviewPlaces();return;}
+ if(!navigator.geolocation){$('#reviewsStatus').textContent='Location is not supported in this browser.';return;}
+ $('#reviewsStatus').textContent='Getting your location…';
+ $('#reviewsLocate').disabled=true;
+ navigator.geolocation.getCurrentPosition(async pos=>{
+   const position={lat:pos.coords.latitude,lon:pos.coords.longitude};nearbyState.position=position;
+   try{nearbyState.places=await queryNearby(position);$('#reviewsStatus').textContent=nearbyState.places.length?`${nearbyState.places.length} public places found`: 'No nearby public places found';renderReviewPlaces()}
+   catch(error){console.error(error);$('#reviewsStatus').textContent='Could not load places. Try again.'}
+   finally{$('#reviewsLocate').disabled=false;}
+ },()=>{$('#reviewsStatus').textContent='Allow location access to find nearby places.';$('#reviewsLocate').disabled=false;},{enableHighAccuracy:true,timeout:15000,maximumAge:60000});
+}
+$('#reviewsLocate').addEventListener('click',()=>{nearbyState.position=null;loadReviewLocation()});
+$('#reviewsSearch').addEventListener('input',renderReviewPlaces);
+$('#saveReview').addEventListener('click',()=>{
+ if(!reviewSelection)return;
+ const selected=document.querySelector('input[name="reviewRating"]:checked');
+ if(!selected){$('#reviewSaved').textContent='Select a rating first.';return;}
+ try{const existing=savedReviews();existing[reviewKey(reviewSelection)]=selected.value;localStorage.setItem(REVIEW_KEY,JSON.stringify(existing));$('#reviewSaved').textContent='Rating saved on this device.';renderReviewPlaces()}
+ catch(error){$('#reviewSaved').textContent='Could not save rating. Check browser storage settings.';}
+});
